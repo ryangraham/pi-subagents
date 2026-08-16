@@ -81,7 +81,9 @@ Package metadata:
 - initial version: `0.1.0`;
 - license: MIT;
 - keyword: `pi-package`;
-- Pi packages and `typebox` declared as `"*"` peer dependencies;
+- `@earendil-works/pi-agent-core`, `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, and `typebox` declared as `"*"` peer dependencies;
+- a `pi.extensions` manifest pointing to `./src/index.ts`;
+- Node.js `>=22.19.0`;
 - no runtime dependencies unless implementation demonstrates a concrete need;
 - Git installation only for version 1.
 
@@ -127,7 +129,8 @@ Only `AgentManager` may mutate live agent state. Per-agent operations are serial
 - a shared `ModelRuntime` for model catalog and credential resolution;
 - a child-specific persistent `SessionManager`;
 - a child-specific `SettingsManager` for the selected cwd;
-- a `DefaultResourceLoader` configured with `noExtensions: true`;
+- a `DefaultResourceLoader` configured with `noExtensions: true`, `noPromptTemplates: true`, and `noThemes: true`;
+- resource-loader overrides that discard discovered custom system prompts and appended system prompts while retaining context files and skills;
 - an exact resolved model;
 - Pi's standard built-in coding tools;
 - normal retry and compaction behavior from Pi settings.
@@ -166,7 +169,7 @@ Each event includes the stable agent ID, timestamp, child session path, and chil
 - errors;
 - lifecycle changes.
 
-Running transcripts use a bounded in-memory cache. The persisted child JSONL remains authoritative. Completed transcripts are rebuilt from the child session on demand rather than duplicated into a second persistent format.
+Running transcripts use a bounded in-memory cache of at most 2,000 normalized records and 2 MiB of rendered text per agent; streaming updates replace their prior record instead of accumulating copies. The persisted child JSONL remains authoritative. Completed transcripts are rebuilt from the child session on demand rather than duplicated into a second persistent format.
 
 ### Agent UI
 
@@ -184,13 +187,13 @@ UI updates read normalized state and never write transcript events into controll
 
 A fresh child receives these layers:
 
-1. Pi's normal coding-agent system prompt;
-2. global and project `AGENTS.md` files discovered for the child's cwd;
+1. Pi's normal coding-agent system prompt, without discovered custom or appended system-prompt resources;
+2. global and project `AGENTS.md` and `CLAUDE.md` context files discovered for the child's cwd;
 3. discovered skill metadata, including the installed Superpowers package;
 4. Pi's standard built-in coding tools;
 5. the explicit dispatch prompt as the first user message.
 
-The initial active built-ins match normal Pi coding-agent defaults: `read`, `bash`, `edit`, and `write`. No extension tools are loaded. Agents may use command-line `rg`, `find`, and related utilities through `bash` as in a normal Pi session.
+The initial active built-ins match normal Pi coding-agent defaults: `read`, `bash`, `edit`, and `write`. No extension tools are loaded. Prompt templates and themes are not loaded because child dispatch is explicit and the child has no TUI. Agents may use command-line `rg`, `find`, and related utilities through `bash` as in a normal Pi session.
 
 ### Excluded context
 
@@ -202,6 +205,8 @@ A child never receives:
 - controller attachments;
 - the controller's expanded skill bodies;
 - a copy of `ctx.getSystemPrompt()`;
+- discovered `SYSTEM.md`, custom system-prompt, or appended system-prompt resources;
+- prompt templates;
 - an automatically generated parent summary;
 - output from another child unless the explicit dispatch prompt references an artifact containing it.
 
@@ -229,7 +234,7 @@ Every agent records a local, viewable context manifest containing:
 - discovered context-file paths;
 - discovered skill names and source paths;
 - confirmation that child extensions were disabled;
-- dispatch byte length and content hash.
+- dispatch byte length and SHA-256 content hash.
 
 The manifest does not duplicate the dispatch prompt or context-file contents. It is available in tool-result details and the TUI viewer, but not in controller model context.
 
@@ -252,7 +257,7 @@ Parameters:
 }
 ```
 
-`model` is required and accepts Pi's exact model syntax, including an optional thinking suffix such as `provider/model:high`.
+`model` is required and uses canonical `provider/model` syntax, with an optional thinking suffix such as `provider/model:high`. Bare IDs, fuzzy matches, and semantic aliases are rejected. The resolved canonical model is recorded before the child starts.
 
 This is the default SDD dispatch primitive.
 
@@ -366,8 +371,10 @@ working  -> failed
 working  -> aborted
 working  -> interrupted
 completed|needs_context|blocked|failed|aborted|interrupted -> working  (resume)
-terminal -> removed
+completed|needs_context|blocked|failed|aborted|interrupted -> removed
 ```
+
+`removed` is final and cannot be resumed.
 
 The display classifier inspects a final response for the Superpowers contracts `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT`, and `BLOCKED`. Classification affects UI state only. It never rewrites the response or overrides the controller's interpretation.
 
@@ -382,7 +389,7 @@ status: <state>
 <child final response>
 ```
 
-Only the child's final assistant response enters controller context. Streaming text, thinking, tool calls, tool output, retries, and earlier child turns remain in the child session and viewer.
+Only the child's final assistant response enters controller context. The returned response concatenates that terminal assistant message's text blocks in source order. Streaming text, thinking, tool calls, tool output, retries, and earlier child turns remain in the child session and viewer.
 
 The final response is capped at 50 KiB using UTF-8-safe truncation. When truncation occurs, the result states that it was truncated and provides the local child-session reference. Full content remains in the child JSONL.
 
@@ -396,8 +403,8 @@ Each child run has a unique run record and cumulative SDK usage captured from as
 
 - `subagent_run` and `subagent_resume` report the current run's usage on their tool result.
 - `subagent_start` reports no usage at startup.
-- The first successful `subagent_wait` after a background run reports that run's unclaimed usage.
-- Concurrent or repeated waits may return the same final text, but usage is claimed atomically by at most one result.
+- The first `subagent_wait` that reports a background run's terminal outcome reports that run's unclaimed usage, including usage incurred by a failed or aborted child.
+- Concurrent or repeated waits may return the same final text or failure, but usage is claimed atomically by at most one result.
 - Resuming creates a new run record, so only the new turn sequence is charged by that resume tool result.
 
 Registry metadata records whether each run's usage has been claimed. If a background agent is never waited on before its controller session ends, its usage remains visible in the agent viewer but cannot be added retrospectively to an already finalized parent tool result.
@@ -490,9 +497,9 @@ Tool calls and results are collapsed by default and bounded for rendering. The p
 
 Completion, failure, blocked, and needs-context transitions update the widget and create local TUI notifications. No custom message is injected into controller context.
 
-A lightweight timer refreshes elapsed time only while agents are active. All subscriptions, timers, and overlay handles are disposed during shutdown.
+A one-second lightweight timer refreshes elapsed time only while agents are active. All subscriptions, timers, and overlay handles are disposed during shutdown.
 
-In non-TUI hosts, model-facing tools continue to operate. The widget, overlay, shortcut, and local notifications are disabled; `subagent_list` remains available.
+In non-TUI hosts, the widget, overlay, shortcut, and local notifications are disabled. Synchronous tools and `subagent_list` remain available; `subagent_start` is rejected in short-lived print and JSON hosts as specified above.
 
 ## Concurrency
 
@@ -502,7 +509,7 @@ Parallel `subagent_run` and `subagent_start` calls are supported for independent
 
 The Superpowers-specific tool guidance prohibits multiple concurrent implementation agents.
 
-Only one active run or resume is allowed for a given agent ID. Multiple waits share the same completion promise. Settled SDK sessions are disposed and reopened only when viewing needs uncached data or when resuming.
+Only one active run or resume is allowed for a given agent ID. Multiple waits share the same completion promise. A settled `AgentSession` is disposed; uncached viewing reads its session file without creating a live agent, and a new `AgentSession` is created only when that child is resumed.
 
 ## Cancellation and errors
 
@@ -542,7 +549,7 @@ The default child cwd is the controller cwd. An override must:
 2. resolve to a canonical path;
 3. remain inside the controller's current trusted Git repository/worktree after symlink resolution.
 
-An override outside that boundary is rejected. To work in another repository, the user starts a controller session in that repository.
+The trust boundary is the canonical Git top level when the controller is in a repository; otherwise it is the canonical controller cwd. An override outside that boundary is rejected. To work in another repository, the user starts a controller session in that repository.
 
 Child extensions are disabled, preventing recursive loading of `pi-subagents` and hidden behavior from unrelated extensions. Skills and context files still load through Pi's normal trusted resource discovery.
 
