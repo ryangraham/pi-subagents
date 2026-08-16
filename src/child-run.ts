@@ -37,6 +37,7 @@ export class ChildRun {
   #finalAssistant: AssistantMessage | undefined;
   #requestedTerminalState: AbortTerminalState | undefined;
   #abortPromise: Promise<void> | undefined;
+  #forceCompletion: ((outcome: AgentOutcome) => void) | undefined;
   #unsubscribe: (() => void) | undefined;
   #settled = false;
   #disposed = false;
@@ -64,9 +65,18 @@ export class ChildRun {
     this.transcript.appendUserPrompt(input.prompt, input.startedAt);
     this.#unsubscribe = input.bundle.session.subscribe((event) => this.#onEvent(event));
 
-    // Invoking this async method synchronously installs the prompt rejection handler
+    const forcedCompletion = new Promise<AgentOutcome>((resolve) => {
+      this.#forceCompletion = resolve;
+    });
+    // Invoking supervision synchronously installs the prompt rejection handler
     // before launch() can return a background run to its caller.
-    this.completion = this.#complete(input.prompt);
+    const supervisedCompletion = this.#supervise(input.prompt);
+    this.completion = Promise.race([supervisedCompletion, forcedCompletion]).then((outcome) => {
+      this.#settled = true;
+      this.#forceCompletion = undefined;
+      this.dispose();
+      return outcome;
+    });
   }
 
   wait(signal: AbortSignal | undefined, abortOnCancel: boolean): Promise<AgentOutcome> {
@@ -107,11 +117,16 @@ export class ChildRun {
     if (this.#settled || this.#disposed) return Promise.resolve();
     this.#requestedTerminalState ??= terminalState;
     if (!this.#abortPromise) {
+      let abortOperation: Promise<void>;
       try {
-        this.#abortPromise = Promise.resolve(this.#bundle.session.abort());
+        abortOperation = Promise.resolve(this.#bundle.session.abort());
       } catch (error) {
-        this.#abortPromise = Promise.reject(error);
+        abortOperation = Promise.reject(error);
       }
+      this.#abortPromise = abortOperation.catch((error: unknown) => {
+        this.#forceTerminalOutcome(error);
+        throw error;
+      });
     }
     return this.#abortPromise;
   }
@@ -139,7 +154,7 @@ export class ChildRun {
     return this.completion;
   }
 
-  async #complete(prompt: string): Promise<AgentOutcome> {
+  async #supervise(prompt: string): Promise<AgentOutcome> {
     try {
       let promptError: unknown;
       try {
@@ -147,14 +162,18 @@ export class ChildRun {
       } catch (error) {
         promptError = error;
       }
-      const outcome = this.#buildOutcome(promptError);
-      this.#settled = true;
-      return outcome;
+      return this.#buildOutcome(promptError);
     } catch (error) {
-      this.#settled = true;
       return this.#emergencyOutcome(error);
-    } finally {
-      this.dispose();
+    }
+  }
+
+  #forceTerminalOutcome(error: unknown): void {
+    if (this.#settled || !this.#forceCompletion) return;
+    try {
+      this.#forceCompletion(this.#buildOutcome(error));
+    } catch (outcomeError) {
+      this.#forceCompletion(this.#emergencyOutcome(outcomeError));
     }
   }
 
@@ -179,7 +198,8 @@ export class ChildRun {
 
     if (this.#requestedTerminalState) {
       state = this.#requestedTerminalState;
-      error = this.#finalAssistant?.errorMessage;
+      error = this.#finalAssistant?.errorMessage ??
+        (promptError === undefined ? undefined : describeError(promptError));
     } else if (promptError !== undefined) {
       state = "failed";
       error = describeError(promptError);

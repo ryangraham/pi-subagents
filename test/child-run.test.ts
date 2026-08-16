@@ -253,6 +253,22 @@ describe("ChildRun cancellation", () => {
     });
   });
 
+  it("forces a terminal outcome when sdk abort rejects without settling prompt", async () => {
+    const session = new FakeAgentSession();
+    session.abort.mockRejectedValue(new Error("abort cleanup failed"));
+    const run = launch(session);
+
+    await expect(run.abort("interrupted")).rejects.toThrow("abort cleanup failed");
+    const result = await Promise.race([
+      run.completion,
+      new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 20)),
+    ]);
+
+    expect(result).not.toBe("timeout");
+    expect(result).toMatchObject({ state: "interrupted", error: "abort cleanup failed" });
+    expect(session.dispose).toHaveBeenCalledOnce();
+  });
+
   it("keeps the first abort reason and distinguishes shutdown interruption", async () => {
     const session = new FakeAgentSession();
     session.setAbortUsage(usage(2, 1));
