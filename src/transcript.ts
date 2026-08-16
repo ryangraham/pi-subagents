@@ -15,9 +15,9 @@ export const MAX_TOOL_RECORD_BYTES = 8 * 1024;
 
 const TOOL_COLLAPSED_MARKER = "\n[… tool detail collapsed …]";
 
-type TranscriptListener = (records: readonly TranscriptRecord[]) => void;
+type TranscriptListener = () => void;
 
-export interface TranscriptStoreOptions {
+export interface TranscriptOptions {
   maxRecords?: number;
   maxBytes?: number;
   initialRecords?: readonly TranscriptRecord[];
@@ -145,7 +145,7 @@ export class TranscriptStore {
   #activeAssistantBase: string | undefined;
   #activeAssistantTimestamp: number | undefined;
 
-  constructor(options: TranscriptStoreOptions = {}) {
+  constructor(options: TranscriptOptions = {}) {
     this.#maxRecords = options.maxRecords ?? MAX_LIVE_TRANSCRIPT_RECORDS;
     this.#maxBytes = options.maxBytes ?? MAX_LIVE_TRANSCRIPT_BYTES;
     if (!Number.isInteger(this.#maxRecords) || this.#maxRecords <= 0) {
@@ -157,7 +157,8 @@ export class TranscriptStore {
     for (const record of options.initialRecords ?? []) this.#upsert({ ...record });
   }
 
-  static replay(entries: readonly SessionEntry[], leafId: string): TranscriptRecord[] {
+  static replay(entries: readonly SessionEntry[], leafId: string | null): TranscriptRecord[] {
+    if (leafId === null) return [];
     const byId = new Map(entries.map((entry) => [entry.id, entry]));
     const leaf = byId.get(leafId);
     if (!leaf) return [];
@@ -593,7 +594,7 @@ export class TranscriptStore {
     if (this.#revision === previousRevision) return;
     for (const listener of [...this.#listeners]) {
       try {
-        listener(this.snapshot());
+        listener();
       } catch {
         this.#listeners.delete(listener);
       }

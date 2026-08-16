@@ -1,7 +1,7 @@
 import type { AssistantMessage, ToolResultMessage, Usage } from "@earendil-works/pi-ai";
 import type { AgentSessionEvent, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
-import { TranscriptStore } from "../src/transcript.ts";
+import { TranscriptStore, type TranscriptOptions } from "../src/transcript.ts";
 import type { TranscriptRecord } from "../src/types.ts";
 
 const usage = (): Usage => ({
@@ -324,7 +324,8 @@ describe("TranscriptStore live normalization", () => {
 
 describe("TranscriptStore bounds and subscriptions", () => {
   it("bounds records while retaining newest data", () => {
-    const store = new TranscriptStore({ maxRecords: 3, maxBytes: 100 });
+    const options: TranscriptOptions = { maxRecords: 3, maxBytes: 100 };
+    const store = new TranscriptStore(options);
     for (const text of ["aaaa", "bbbb", "cccc", "dddd"]) store.apply(statusEvent(text));
 
     expect(store.snapshot().map((record) => record.text)).toEqual([
@@ -383,6 +384,7 @@ describe("TranscriptStore bounds and subscriptions", () => {
     snapshot[0]!.text = "mutated";
 
     expect(stable).toHaveBeenCalledTimes(2);
+    expect(stable).toHaveBeenCalledWith();
     expect(throwing).toHaveBeenCalledOnce();
     expect(store.snapshot()[0]?.text).toBe("one");
   });
@@ -421,7 +423,8 @@ describe("TranscriptStore persisted replay", () => {
     expect(text).not.toContain("branch a answer");
   });
 
-  it("returns an empty transcript for a missing leaf", () => {
+  it("returns an empty transcript for a null or missing leaf", () => {
+    expect(TranscriptStore.replay(branchedEntries, null)).toEqual([]);
     expect(TranscriptStore.replay(branchedEntries, "missing_leaf")).toEqual([]);
   });
 });
