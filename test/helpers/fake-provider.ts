@@ -68,8 +68,10 @@ function assistant(text: string, usage: Usage): AssistantMessage {
 }
 
 export async function createFakeProvider(responses: FakeResponse[]): Promise<FakeProviderHarness> {
+  const credentials = new InMemoryCredentialStore();
+  await credentials.modify("fake", async () => ({ type: "api_key", key: "test-key" }));
   const runtime = await ModelRuntime.create({
-    credentials: new InMemoryCredentialStore(),
+    credentials,
     modelsPath: null,
     allowModelNetwork: false,
   });
@@ -113,7 +115,6 @@ export async function createFakeProvider(responses: FakeResponse[]): Promise<Fak
     },
   });
 
-  await runtime.setRuntimeApiKey("fake", "test-key");
   const model = runtime.getModel("fake", "worker");
   if (!model) throw new Error("Fake provider model was not registered");
 

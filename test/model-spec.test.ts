@@ -6,8 +6,11 @@ import { resolveExactModelSpec } from "../src/model-spec.ts";
 let runtime: ModelRuntime;
 
 beforeAll(async () => {
+  const credentials = new InMemoryCredentialStore();
+  await credentials.modify("fake", async () => ({ type: "api_key", key: "fake-key" }));
+  await credentials.modify("openrouter", async () => ({ type: "api_key", key: "openrouter-key" }));
   runtime = await ModelRuntime.create({
-    credentials: new InMemoryCredentialStore(),
+    credentials,
     modelsPath: null,
     allowModelNetwork: false,
   });
@@ -58,8 +61,6 @@ beforeAll(async () => {
     ],
   });
 
-  await runtime.setRuntimeApiKey("fake", "fake-key");
-  await runtime.setRuntimeApiKey("openrouter", "openrouter-key");
 });
 
 describe("resolveExactModelSpec", () => {
