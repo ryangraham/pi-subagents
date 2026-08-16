@@ -54,6 +54,12 @@ export class AgentRegistry {
       .map((record) => structuredClone(record));
   }
 
+  hasRunId(runId: string): boolean {
+    return [...this.records.values()].some((record) =>
+      record.runs.some((run) => run.runId === runId),
+    );
+  }
+
   append(event: RegistryEvent): void {
     const before = new Map(this.records);
     try {

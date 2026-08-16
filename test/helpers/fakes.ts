@@ -1,9 +1,14 @@
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, StopReason, ToolResultMessage, Usage } from "@earendil-works/pi-ai";
-import type {
-  AgentSessionEvent,
-  AgentSessionEventListener,
-  SessionEntry,
+import {
+  CURRENT_SESSION_VERSION,
+  type AgentSessionEvent,
+  type AgentSessionEventListener,
+  type SessionEntry,
+  type SessionHeader,
 } from "@earendil-works/pi-coding-agent";
 import { vi } from "vitest";
 import type { ChildSessionBundle } from "../../src/session-factory.ts";
@@ -71,9 +76,13 @@ function assistantMessage(
   };
 }
 
+export interface FakeAgentSessionOptions {
+  persistSession?: boolean;
+}
+
 export class FakeAgentSession {
-  readonly sessionFile = "/tmp/fake-child.jsonl";
-  readonly sessionId = "fake-child-session";
+  readonly sessionFile: string;
+  readonly sessionId: string;
   readonly thinkingLevel: ThinkingLevel = "off";
   readonly prompt = vi.fn((text: string): Promise<void> => {
     if (this.resolvePrompt || this.rejectPrompt) throw new Error("Fake prompt already active");
@@ -85,7 +94,7 @@ export class FakeAgentSession {
   });
   readonly abort = vi.fn(async (): Promise<void> => {
     if (!this.resolvePrompt && !this.rejectPrompt) return;
-    this.emitAssistant("", this.abortUsage, "aborted", "Request aborted");
+    this.emitAssistantEntry("", this.abortUsage, "aborted", "Request aborted");
     this.resolvePending();
   });
   readonly dispose = vi.fn((): void => {
@@ -105,10 +114,36 @@ export class FakeAgentSession {
   private abortUsage: Usage = structuredClone(ZERO_USAGE);
   private leafId: string | null;
   private entries: SessionEntry[];
+  private entrySequence = 0;
+  private readonly sessionDirectory: string | undefined;
 
-  constructor(entries: readonly SessionEntry[] = [], leafId: string | null = null) {
+  constructor(
+    entries: readonly SessionEntry[] = [],
+    leafId: string | null = null,
+    options: FakeAgentSessionOptions = {},
+  ) {
     this.entries = structuredClone([...entries]);
-    this.leafId = leafId;
+    this.leafId = leafId ?? entries.at(-1)?.id ?? null;
+    if (options.persistSession) {
+      this.sessionDirectory = mkdtempSync(join(tmpdir(), "pi-subagents-fake-"));
+      this.sessionId = basename(this.sessionDirectory);
+      this.sessionFile = join(this.sessionDirectory, `${this.sessionId}.jsonl`);
+      const header: SessionHeader = {
+        type: "session",
+        version: CURRENT_SESSION_VERSION,
+        id: this.sessionId,
+        timestamp: new Date(0).toISOString(),
+        cwd: "/repo",
+      };
+      writeFileSync(
+        this.sessionFile,
+        `${[header, ...this.entries].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+        "utf8",
+      );
+    } else {
+      this.sessionId = "fake-child-session";
+      this.sessionFile = "/tmp/fake-child.jsonl";
+    }
   }
 
   subscribe(listener: AgentSessionEventListener): () => void {
@@ -130,6 +165,14 @@ export class FakeAgentSession {
     return ["read", "bash", "edit", "write"];
   }
 
+  cleanup(): void {
+    if (this.sessionDirectory) rmSync(this.sessionDirectory, { recursive: true, force: true });
+  }
+
+  isPending(): boolean {
+    return this.resolvePrompt !== undefined && this.rejectPrompt !== undefined;
+  }
+
   setAbortUsage(value: Usage): void {
     this.abortUsage = structuredClone(value);
   }
@@ -144,11 +187,7 @@ export class FakeAgentSession {
     stopReason: StopReason = "stop",
     errorMessage?: string,
   ): void {
-    this.lastAssistantText = text;
-    this.emit({
-      type: "message_end",
-      message: assistantMessage(text, messageUsage, stopReason, errorMessage),
-    });
+    this.emitAssistantEntry(text, messageUsage, stopReason, errorMessage);
   }
 
   emitToolResult(messageUsage: Usage): void {
@@ -162,19 +201,34 @@ export class FakeAgentSession {
       isError: false,
       timestamp: Date.now(),
     };
+    this.appendEntry({
+      type: "message",
+      id: this.nextEntryId("tool"),
+      parentId: this.leafId,
+      timestamp: new Date().toISOString(),
+      message,
+    });
     this.emit({ type: "message_end", message });
   }
 
   emitCompaction(messageUsage: Usage): void {
+    const result = {
+      summary: "compacted",
+      firstKeptEntryId: "entry_1",
+      tokensBefore: 1_000,
+      usage: structuredClone(messageUsage),
+    };
+    this.appendEntry({
+      type: "compaction",
+      id: this.nextEntryId("compaction"),
+      parentId: this.leafId,
+      timestamp: new Date().toISOString(),
+      ...result,
+    });
     this.emit({
       type: "compaction_end",
       reason: "threshold",
-      result: {
-        summary: "compacted",
-        firstKeptEntryId: "entry_1",
-        tokensBefore: 1_000,
-        usage: structuredClone(messageUsage),
-      },
+      result,
       aborted: false,
       willRetry: false,
     });
@@ -182,31 +236,58 @@ export class FakeAgentSession {
 
   complete(text: string, messageUsage: Usage, leafId = "leaf_complete"): void {
     this.requirePending();
-    this.leafId = leafId;
-    this.emitAssistant(text, messageUsage, "stop");
+    this.emitAssistantEntry(text, messageUsage, "stop", undefined, leafId);
     this.resolvePending();
   }
 
   completeError(errorMessage: string, messageUsage: Usage, leafId = "leaf_error"): void {
     this.requirePending();
-    this.leafId = leafId;
-    this.emitAssistant("", messageUsage, "error", errorMessage);
+    this.emitAssistantEntry("", messageUsage, "error", errorMessage, leafId);
     this.resolvePending();
   }
 
   fail(error: unknown, messageUsage: Usage, leafId = "leaf_failed"): void {
     this.requirePending();
-    this.leafId = leafId;
     let message = "Unknown child failure";
     try {
       message = error instanceof Error ? error.message : String(error);
     } catch {
       // Preserve the raw rejection for ChildRun while keeping the fake event well formed.
     }
-    this.emitAssistant("", messageUsage, "error", message);
+    this.emitAssistantEntry("", messageUsage, "error", message, leafId);
     const reject = this.rejectPrompt;
     this.clearPending();
     reject?.(error);
+  }
+
+  private emitAssistantEntry(
+    text: string,
+    messageUsage: Usage,
+    stopReason: StopReason,
+    errorMessage?: string,
+    entryId = this.nextEntryId("assistant"),
+  ): void {
+    this.lastAssistantText = text;
+    const message = assistantMessage(text, messageUsage, stopReason, errorMessage);
+    this.appendEntry({
+      type: "message",
+      id: entryId,
+      parentId: this.leafId,
+      timestamp: new Date().toISOString(),
+      message,
+    });
+    this.emit({ type: "message_end", message });
+  }
+
+  private nextEntryId(kind: string): string {
+    this.entrySequence += 1;
+    return `fake_${kind}_${this.entrySequence}`;
+  }
+
+  private appendEntry(entry: SessionEntry): void {
+    this.entries.push(structuredClone(entry));
+    this.leafId = entry.id;
+    if (this.sessionDirectory) appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`, "utf8");
   }
 
   private requirePending(): void {

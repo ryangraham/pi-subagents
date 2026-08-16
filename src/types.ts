@@ -28,6 +28,24 @@ export interface DispatchRequest {
   cwd?: string;
 }
 
+export interface ControllerScope {
+  parentSessionId: string;
+  cwd: string;
+  projectTrusted: boolean;
+  mode: "tui" | "rpc" | "json" | "print";
+}
+
+export interface StartResult {
+  agentId: string;
+  runId: string;
+  state: "working";
+}
+
+export interface ClaimedOutcome {
+  outcome: AgentOutcome;
+  claimedUsage?: Usage;
+}
+
 export interface ResolvedModelSpec {
   provider: string;
   modelId: string;
