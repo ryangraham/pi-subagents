@@ -295,6 +295,7 @@ export class AgentManager {
   ): Promise<SetupHandle> {
     let bundle: Awaited<ReturnType<AgentManagerDependencies["factory"]["createFresh"]>> | undefined;
     let started = false;
+    let reservationHeld = true;
     try {
       try {
         bundle = await this.#factory.createFresh({
@@ -389,6 +390,8 @@ export class AgentManager {
       }
 
       const active = this.#activate(child, pending.agentId, pending.runId);
+      this.#reservedSlots -= 1;
+      reservationHeld = false;
       this.#notifyRoster();
       return { startResult, active };
     } finally {
@@ -396,7 +399,7 @@ export class AgentManager {
       if (this.#pendingSetups.get(pending.agentId) === pending) {
         this.#pendingSetups.delete(pending.agentId);
       }
-      this.#reservedSlots -= 1;
+      if (reservationHeld) this.#reservedSlots -= 1;
     }
   }
 

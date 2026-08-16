@@ -7,6 +7,7 @@ import {
   type ControllerScope,
   type DispatchRequest,
   type RegistryEvent,
+  type StartResult,
   type TranscriptRecord,
 } from "../src/types.ts";
 import { FakeAgentSession, fakeBundle, fixedManifest, usage } from "./helpers/fakes.ts";
@@ -335,6 +336,30 @@ describe("AgentManager admission and identity", () => {
     );
   });
 
+  it("hands a reserved slot to the active map before notifying working subscribers", async () => {
+    const sessions = [fakeSession(), fakeSession()];
+    const { manager } = fixture({ sessions, maxActive: 2 });
+    let secondRequested = false;
+    let secondStart: Promise<StartResult> | undefined;
+    const unsubscribe = manager.subscribe((records) => {
+      if (!secondRequested && records.some((record) => record.state === "working")) {
+        secondRequested = true;
+        secondStart = manager.start({ ...request, description: "second" }, scope);
+      }
+    });
+
+    const first = await manager.start(request, scope);
+    if (!secondStart) throw new Error("working subscriber did not request the second agent");
+    const second = await secondStart;
+    expect(second).toMatchObject({ state: "working" });
+
+    unsubscribe();
+    await Promise.all([
+      settle(manager, sessions[0]!, first.agentId),
+      settle(manager, sessions[1]!, second.agentId),
+    ]);
+  });
+
   it("prevents simultaneous starts from passing a one-slot reservation", async () => {
     const session = fakeSession();
     const setup = deferred<ReturnType<typeof fakeBundle>>();
@@ -515,21 +540,21 @@ describe("AgentManager subscriptions", () => {
   it("removes throwing subscribers without breaking lifecycle persistence", async () => {
     const { manager, sessions, persisted } = fixture();
     const roster = vi.fn(() => {
-      throw new Error("roster failed");
+      if (roster.mock.calls.length > 1) throw new Error("roster failed");
     });
     manager.subscribe(roster);
 
     const started = await manager.start(request, scope);
     const transcript = vi.fn(() => {
-      throw new Error("transcript failed");
+      if (transcript.mock.calls.length > 1) throw new Error("transcript failed");
     });
     manager.subscribeTranscript(started.agentId, transcript);
     sessions[0]!.emit({ type: "agent_start" });
     sessions[0]!.complete("Status: DONE", usage(1, 1));
     await manager.wait(started.agentId);
 
-    expect(roster).toHaveBeenCalledOnce();
-    expect(transcript).toHaveBeenCalledOnce();
+    expect(roster).toHaveBeenCalledTimes(2);
+    expect(transcript).toHaveBeenCalledTimes(2);
     expect(persisted).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "settled" })]));
   });
 });
