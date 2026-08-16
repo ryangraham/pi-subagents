@@ -44,6 +44,12 @@ export function addUsage(left: Usage, right: Usage): Usage {
     output: left.output + right.output,
     cacheRead: left.cacheRead + right.cacheRead,
     cacheWrite: left.cacheWrite + right.cacheWrite,
+    ...(left.cacheWrite1h === undefined && right.cacheWrite1h === undefined
+      ? {}
+      : { cacheWrite1h: (left.cacheWrite1h ?? 0) + (right.cacheWrite1h ?? 0) }),
+    ...(left.reasoning === undefined && right.reasoning === undefined
+      ? {}
+      : { reasoning: (left.reasoning ?? 0) + (right.reasoning ?? 0) }),
     totalTokens: left.totalTokens + right.totalTokens,
     cost: {
       input: left.cost.input + right.cost.input,

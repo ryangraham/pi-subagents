@@ -85,6 +85,13 @@ describe("addUsage", () => {
     expect(addUsage(usage(10, 3), usage(5, 5))).toEqual(usage(15, 8));
   });
 
+  it("adds optional cache-write and reasoning categories when either side reports them", () => {
+    const left: Usage = { ...usage(1, 1), cacheWrite1h: 2, reasoning: 3 };
+    const right: Usage = { ...usage(2, 2), cacheWrite1h: 5 };
+
+    expect(addUsage(left, right)).toMatchObject({ cacheWrite1h: 7, reasoning: 3 });
+  });
+
   it("adds cache categories independently", () => {
     const left: Usage = {
       ...usage(1, 2),
