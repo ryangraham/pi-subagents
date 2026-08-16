@@ -268,7 +268,11 @@ describe("AgentRegistry transitions", () => {
       manifest: manifest({ cwd: "/repo/subdir" }),
       usage: usage(11, 5),
     });
-    const registry = AgentRegistry.fromEvents([createdEvent(), startedEvent(), failed], vi.fn());
+    const eventWithUnexpectedText = {
+      ...failed,
+      finalText: "SECRET_TRANSCRIPT_BODY",
+    } as unknown as RegistryEvent;
+    const registry = AgentRegistry.fromEvents([createdEvent(), startedEvent(), eventWithUnexpectedText], vi.fn());
     const record = registry.get(AGENT_ID);
 
     expect(record).toMatchObject({
@@ -279,7 +283,7 @@ describe("AgentRegistry transitions", () => {
       childLeafId: "leaf_error",
       runs: [expect.objectContaining({ usage: usage(11, 5), childLeafId: "leaf_error" })],
     });
-    expect(JSON.stringify(failed)).not.toContain("finalText");
+    expect(JSON.stringify(record)).not.toContain("SECRET_TRANSCRIPT_BODY");
     expect(JSON.stringify(record)).not.toContain("finalText");
   });
 
@@ -306,6 +310,26 @@ describe("AgentRegistry transitions", () => {
 });
 
 describe("AgentRegistry usage claims", () => {
+  it("rejects claiming usage from a run that is still active", () => {
+    const append = vi.fn();
+    const registry = AgentRegistry.fromEvents(
+      [createdEvent(), startedEvent(runRecord({ usage: usage() }))],
+      append,
+    );
+
+    expect(() => registry.claimUsage(AGENT_ID, RUN_ID, 500)).toThrow(`Unknown or unsettled run: ${RUN_ID}`);
+    expect(append).not.toHaveBeenCalled();
+  });
+
+  it("rejects a persisted usage claim for a run that is still active", () => {
+    expect(() =>
+      AgentRegistry.fromEvents(
+        [createdEvent(), startedEvent(runRecord({ usage: usage() })), usageClaimedEvent()],
+        vi.fn(),
+      ),
+    ).toThrow(`Unknown or unsettled run: ${RUN_ID}`);
+  });
+
   it("claims terminal usage once and persists usage_claimed", () => {
     const append = vi.fn();
     const runUsage = usage();

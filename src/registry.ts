@@ -68,6 +68,9 @@ export class AgentRegistry {
   claimUsage(agentId: string, runId: string, at = Date.now()): AgentRunRecord["usage"] | undefined {
     const record = this.require(agentId);
     const run = record.runs.find((value) => value.runId === runId);
+    if (run?.usage && run.settledAt === undefined) {
+      throw new Error(`Unknown or unsettled run: ${runId}`);
+    }
     if (!run?.usage || run.usageClaimed) return undefined;
     this.append({ version: REGISTRY_VERSION, kind: "usage_claimed", agentId, runId, at });
     return structuredClone(run.usage);
@@ -142,7 +145,9 @@ export class AgentRegistry {
     if (event.kind === "usage_claimed") {
       const runIndex = record.runs.findIndex((run) => run.runId === event.runId);
       const run = record.runs[runIndex];
-      if (!run?.usage) throw new Error(`Unknown or unsettled run: ${event.runId}`);
+      if (!run?.usage || run.settledAt === undefined) {
+        throw new Error(`Unknown or unsettled run: ${event.runId}`);
+      }
       if (run.usageClaimed) return;
       const runs = record.runs.map((value, index) =>
         index === runIndex ? { ...value, usageClaimed: true } : value,
