@@ -86,3 +86,70 @@ export interface TranscriptRecord {
   isError?: boolean;
   streaming?: boolean;
 }
+
+export interface AgentRunRecord {
+  runId: string;
+  index: number;
+  promptSha256: string;
+  startedAt: number;
+  settledAt?: number;
+  usage?: Usage;
+  usageClaimed: boolean;
+  childLeafId?: string | null;
+}
+
+export interface AgentRecord {
+  id: string;
+  description: string;
+  cwd: string;
+  model: string;
+  thinkingLevel?: ThinkingLevel;
+  state: AgentState;
+  sessionFile?: string;
+  childLeafId?: string | null;
+  manifest?: ContextManifest;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+  runs: AgentRunRecord[];
+}
+
+interface RegistryEventBase {
+  version: typeof REGISTRY_VERSION;
+  agentId: string;
+  at: number;
+}
+
+interface WorkingRegistryPayload {
+  run: AgentRunRecord;
+  state: "working";
+  sessionFile?: string;
+  childLeafId: string | null;
+  manifest?: ContextManifest;
+}
+
+interface TerminalRegistryPayload {
+  /** Present only when a fresh setup settles before its `started` event. */
+  run?: AgentRunRecord;
+  sessionFile?: string;
+  childLeafId: string | null;
+  manifest?: ContextManifest;
+  error?: string;
+  usage?: Usage;
+}
+
+export type RegistryEvent =
+  | (RegistryEventBase & { kind: "created"; record: AgentRecord })
+  | (RegistryEventBase & WorkingRegistryPayload & { kind: "started" })
+  | (RegistryEventBase & WorkingRegistryPayload & { kind: "resumed" })
+  | (RegistryEventBase &
+      TerminalRegistryPayload & {
+        kind: "settled";
+        runId: string;
+        state: "completed" | "needs_context" | "blocked" | "failed";
+      })
+  | (RegistryEventBase & TerminalRegistryPayload & { kind: "aborted"; runId: string; state: "aborted" })
+  | (RegistryEventBase &
+      TerminalRegistryPayload & { kind: "interrupted"; runId: string | null; state: "interrupted" })
+  | (RegistryEventBase & { kind: "usage_claimed"; runId: string })
+  | (RegistryEventBase & { kind: "removed" });
