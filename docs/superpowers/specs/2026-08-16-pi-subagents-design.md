@@ -148,6 +148,7 @@ created
 started
 settled
 resumed
+usage_claimed
 aborted
 interrupted
 removed
