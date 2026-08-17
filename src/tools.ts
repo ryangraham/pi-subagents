@@ -243,8 +243,9 @@ export function registerSubagentTools(
     description: TOOL_METADATA.subagent_wait[1],
     promptSnippet: TOOL_METADATA.subagent_wait[1],
     parameters: AgentIdParameters,
-    async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       try {
+        scopeFromContext(ctx);
         return terminalResult(
           "subagent_wait",
           await getManager().wait(params.agentId, signal),
@@ -284,8 +285,9 @@ export function registerSubagentTools(
     description: TOOL_METADATA.subagent_abort[1],
     promptSnippet: TOOL_METADATA.subagent_abort[1],
     parameters: AgentIdParameters,
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       try {
+        scopeFromContext(ctx);
         const record = await getManager().abort(params.agentId);
         return textResult(`agent_id: ${record.id}\nstatus: ${record.state}`, {
           operation: "subagent_abort",
@@ -304,8 +306,9 @@ export function registerSubagentTools(
     description: TOOL_METADATA.subagent_list[1],
     promptSnippet: TOOL_METADATA.subagent_list[1],
     parameters: EmptyParameters,
-    async execute() {
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       try {
+        scopeFromContext(ctx);
         const records = getManager().list();
         const now = Date.now();
         const text = records.length === 0

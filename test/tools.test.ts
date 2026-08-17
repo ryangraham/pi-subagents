@@ -188,6 +188,12 @@ describe("registerSubagentTools", () => {
     const { manager, execute } = fixture();
     const signal = new AbortController().signal;
     const ctx = context("rpc", false);
+    const getSessionId = vi.fn(() => "parent-session");
+    (ctx.sessionManager as unknown as { getSessionId(): string }).getSessionId = getSessionId;
+    const startContext = context("tui", false);
+    const startGetSessionId = vi.fn(() => "parent-session");
+    (startContext.sessionManager as unknown as { getSessionId(): string }).getSessionId =
+      startGetSessionId;
     const dispatch = {
       description: "implement task",
       prompt: "work",
@@ -196,7 +202,7 @@ describe("registerSubagentTools", () => {
     };
 
     await execute("subagent_run", dispatch, ctx, signal);
-    await execute("subagent_start", dispatch, context("tui", false), signal);
+    await execute("subagent_start", dispatch, startContext, signal);
     await execute("subagent_wait", { agentId: "sa_00000001" }, ctx, signal);
     await execute(
       "subagent_resume",
@@ -222,6 +228,8 @@ describe("registerSubagentTools", () => {
     expect(manager.resume).toHaveBeenCalledWith("sa_00000001", "fix", expectedScope, signal);
     expect(manager.abort).toHaveBeenCalledWith("sa_00000001");
     expect(manager.list).toHaveBeenCalled();
+    expect(getSessionId).toHaveBeenCalledTimes(5);
+    expect(startGetSessionId).toHaveBeenCalledOnce();
   });
 
   it("rejects background start in print and json while keeping foreground run available", async () => {
