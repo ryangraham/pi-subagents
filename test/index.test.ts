@@ -103,10 +103,42 @@ function context(
     mode?: ExtensionContext["mode"];
     hasUI?: boolean;
     sessionId?: string;
+    holdOverlay?: boolean;
   } = {},
 ) {
   const notify = vi.fn();
   const setWidget = vi.fn();
+  const confirm = vi.fn(async () => true);
+  const requestRender = vi.fn();
+  const customComponents: Array<{ handleInput?(data: string): void; dispose?(): void }> = [];
+  const overlayDones: Array<ReturnType<typeof vi.fn<(value?: unknown) => void>>> = [];
+  const custom = vi.fn(async (factory: (...args: any[]) => any) => {
+    let resolveDone!: (value: unknown) => void;
+    const completion = new Promise<unknown>((resolve) => {
+      resolveDone = resolve;
+    });
+    let closed = false;
+    const done = vi.fn<(value?: unknown) => void>((value) => {
+      if (closed) return;
+      closed = true;
+      resolveDone(value);
+    });
+    overlayDones.push(done);
+    const component = await factory(
+      { requestRender } as unknown as TUI,
+      {
+        fg: (_color: string, text: string) => text,
+        bold: (text: string) => text,
+      } as Theme,
+      {
+        matches: (data: string, action: string) => data === `<${action}>`,
+      },
+      done,
+    );
+    customComponents.push(component);
+    if (!options.holdOverlay) done(undefined);
+    return completion;
+  });
   const getBranch = vi.fn(() => structuredClone([...entries]));
   const ctx = {
     mode: options.mode ?? "tui",
@@ -118,9 +150,19 @@ function context(
       getSessionId: () => options.sessionId ?? "parent-session",
     },
     isProjectTrusted: () => options.trusted ?? true,
-    ui: { notify, setWidget },
+    ui: { notify, setWidget, confirm, custom },
   } as unknown as ExtensionContext;
-  return { ctx, notify, setWidget, getBranch };
+  return {
+    ctx,
+    notify,
+    setWidget,
+    confirm,
+    custom,
+    customComponents,
+    overlayDones,
+    requestRender,
+    getBranch,
+  };
 }
 
 function fixture(factoryOverrides: Partial<Pick<SessionFactory, "createFresh" | "reopen">> = {}) {
@@ -229,9 +271,9 @@ describe("pi-subagents extension lifecycle", () => {
     expect(sendUserMessage).not.toHaveBeenCalled();
   });
 
-  it("registers /agents and Alt+A once and delegates both to the current UI", async () => {
+  it("registers /agents and Alt+A once and opens the real overlay", async () => {
     const { emit, commands, shortcuts, sendMessage, sendUserMessage } = fixture();
-    const { ctx, notify } = context();
+    const { ctx, notify, custom } = context();
     await emit("session_start", { type: "session_start", reason: "startup" }, ctx);
 
     expect([...commands.keys()]).toEqual(["agents"]);
@@ -239,24 +281,144 @@ describe("pi-subagents extension lifecycle", () => {
     await commands.get("agents")!.handler("", ctx);
     await shortcuts[0]!.handler(ctx);
 
-    expect(notify).toHaveBeenCalledTimes(2);
-    expect(notify).toHaveBeenCalledWith(
-      "Agent viewer is not available until the viewer component is installed",
-      "info",
-    );
+    expect(custom).toHaveBeenCalledTimes(2);
+    expect(custom).toHaveBeenCalledWith(expect.any(Function), {
+      overlay: true,
+      overlayOptions: { width: "95%", maxHeight: "90%", anchor: "center", margin: 1 },
+    });
+    expect(notify).not.toHaveBeenCalled();
     expect(sendMessage).not.toHaveBeenCalled();
     expect(sendUserMessage).not.toHaveBeenCalled();
   });
 
   it("keeps all agent UI disabled outside TUI mode", async () => {
     const { emit, commands, shortcuts } = fixture();
-    const { ctx, notify, setWidget } = context([], { mode: "rpc", hasUI: true });
+    const { ctx, notify, setWidget, custom } = context([], { mode: "print", hasUI: true });
     await emit("session_start", { type: "session_start", reason: "startup" }, ctx);
 
     await commands.get("agents")!.handler("", ctx);
     await shortcuts[0]!.handler(ctx);
     expect(setWidget).not.toHaveBeenCalled();
+    expect(custom).not.toHaveBeenCalled();
     expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("confirms abort and does nothing when confirmation is declined", async () => {
+    const child = childSession();
+    const { emit, execute, commands } = fixture({
+      createFresh: vi.fn(async () => fakeBundle(child)),
+    });
+    const overlay = context([], { holdOverlay: true });
+    await emit("session_start", { type: "session_start", reason: "startup" }, overlay.ctx);
+    await execute(
+      "subagent_start",
+      { description: "active", prompt: "work", model: "fake/worker" },
+      overlay.ctx,
+    );
+    overlay.confirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const opening = commands.get("agents")!.handler("", overlay.ctx);
+    await vi.waitFor(() => expect(overlay.customComponents).toHaveLength(1));
+    const viewer = overlay.customComponents[0]!;
+
+    viewer.handleInput!("a");
+    await vi.waitFor(() => expect(overlay.confirm).toHaveBeenCalledTimes(1));
+    expect(child.abort).not.toHaveBeenCalled();
+    viewer.handleInput!("a");
+    await vi.waitFor(() => expect(child.abort).toHaveBeenCalledOnce());
+    expect(overlay.confirm).toHaveBeenLastCalledWith(
+      "Abort subagent?",
+      expect.stringContaining("sa_"),
+    );
+
+    overlay.overlayDones[0]!(undefined);
+    await opening;
+    await emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, overlay.ctx);
+  });
+
+  it("confirms removal and leaves terminal records intact when declined", async () => {
+    const { emit, execute, commands } = fixture();
+    const overlay = context(branchEntries("sa_abcdef12"), { holdOverlay: true });
+    await emit("session_start", { type: "session_start", reason: "startup" }, overlay.ctx);
+    overlay.confirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const opening = commands.get("agents")!.handler("", overlay.ctx);
+    await vi.waitFor(() => expect(overlay.customComponents).toHaveLength(1));
+    const viewer = overlay.customComponents[0]!;
+
+    viewer.handleInput!("x");
+    await vi.waitFor(() => expect(overlay.confirm).toHaveBeenCalledTimes(1));
+    let listed = await execute("subagent_list", {}, overlay.ctx);
+    expect(listed.content[0]).toMatchObject({ text: expect.stringContaining("sa_abcdef12") });
+
+    viewer.handleInput!("x");
+    await vi.waitFor(async () => {
+      listed = await execute("subagent_list", {}, overlay.ctx);
+      expect(listed.content[0]).toMatchObject({ text: "No subagents in this controller branch" });
+    });
+    expect(overlay.confirm).toHaveBeenLastCalledWith(
+      "Remove subagent?",
+      expect.stringContaining("sa_abcdef12"),
+    );
+
+    overlay.overlayDones[0]!(undefined);
+    await opening;
+    await emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, overlay.ctx);
+  });
+
+  it("turns rejected viewer mutations into local error notifications", async () => {
+    const child = childSession();
+    child.abort.mockRejectedValueOnce(new Error("abort exploded"));
+    const { emit, execute, commands } = fixture({
+      createFresh: vi.fn(async () => fakeBundle(child)),
+    });
+    const overlay = context([], { holdOverlay: true });
+    await emit("session_start", { type: "session_start", reason: "startup" }, overlay.ctx);
+    await execute(
+      "subagent_start",
+      { description: "active", prompt: "work", model: "fake/worker" },
+      overlay.ctx,
+    );
+    const opening = commands.get("agents")!.handler("", overlay.ctx);
+    await vi.waitFor(() => expect(overlay.customComponents).toHaveLength(1));
+
+    overlay.customComponents[0]!.handleInput!("a");
+    await vi.waitFor(() => {
+      expect(overlay.notify).toHaveBeenCalledWith(
+        expect.stringContaining("abort exploded"),
+        "error",
+      );
+    });
+
+    overlay.overlayDones[0]!(undefined);
+    await opening;
+    await emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, overlay.ctx);
+  });
+
+  it("does not open a second concurrent viewer overlay", async () => {
+    const { emit, commands } = fixture();
+    const overlay = context([], { holdOverlay: true });
+    await emit("session_start", { type: "session_start", reason: "startup" }, overlay.ctx);
+
+    const first = commands.get("agents")!.handler("", overlay.ctx);
+    const second = commands.get("agents")!.handler("", overlay.ctx);
+    await vi.waitFor(() => expect(overlay.customComponents).toHaveLength(1));
+    expect(overlay.custom).toHaveBeenCalledOnce();
+    overlay.overlayDones[0]!(undefined);
+    await Promise.all([first, second]);
+    await emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, overlay.ctx);
+  });
+
+  it("closes and disposes an open viewer during controller shutdown", async () => {
+    const { emit, commands } = fixture();
+    const overlay = context([], { holdOverlay: true });
+    await emit("session_start", { type: "session_start", reason: "startup" }, overlay.ctx);
+    const opening = commands.get("agents")!.handler("", overlay.ctx);
+    await vi.waitFor(() => expect(overlay.customComponents).toHaveLength(1));
+    const disposeViewer = vi.spyOn(overlay.customComponents[0]!, "dispose");
+
+    await emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, overlay.ctx);
+    await opening;
+    expect(overlay.overlayDones[0]).toHaveBeenCalledOnce();
+    expect(disposeViewer).toHaveBeenCalledOnce();
   });
 
   it("disposes and reinstalls branch-local UI across reload and tree reconstruction", async () => {
