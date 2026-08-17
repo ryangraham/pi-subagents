@@ -3,8 +3,10 @@ import type {
   ExtensionContext,
   ModelRuntime,
   SessionEntry,
+  Theme,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { Key, type TUI } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSubagentsExtension } from "../src/index.ts";
 import type { SessionFactory } from "../src/session-factory.ts";
@@ -104,6 +106,7 @@ function context(
   } = {},
 ) {
   const notify = vi.fn();
+  const setWidget = vi.fn();
   const getBranch = vi.fn(() => structuredClone([...entries]));
   const ctx = {
     mode: options.mode ?? "tui",
@@ -115,15 +118,19 @@ function context(
       getSessionId: () => options.sessionId ?? "parent-session",
     },
     isProjectTrusted: () => options.trusted ?? true,
-    ui: { notify },
+    ui: { notify, setWidget },
   } as unknown as ExtensionContext;
-  return { ctx, notify, getBranch };
+  return { ctx, notify, setWidget, getBranch };
 }
 
 function fixture(factoryOverrides: Partial<Pick<SessionFactory, "createFresh" | "reopen">> = {}) {
   const tools: ToolDefinition<any, any>[] = [];
   const handlers = new Map<string, Array<(event: any, ctx: ExtensionContext) => unknown>>();
+  const commands = new Map<string, { handler(args: string, ctx: ExtensionContext): Promise<void> }>();
+  const shortcuts: Array<{ key: string; handler(ctx: ExtensionContext): Promise<void> | void }> = [];
   const appendEntry = vi.fn();
+  const sendMessage = vi.fn();
+  const sendUserMessage = vi.fn();
   const pi = {
     registerTool: (tool: ToolDefinition<any, any>) => tools.push(tool),
     on: (name: string, handler: (event: any, ctx: ExtensionContext) => unknown) => {
@@ -131,7 +138,17 @@ function fixture(factoryOverrides: Partial<Pick<SessionFactory, "createFresh" | 
       values.push(handler);
       handlers.set(name, values);
     },
+    registerCommand: (
+      name: string,
+      options: { handler(args: string, ctx: ExtensionContext): Promise<void> },
+    ) => commands.set(name, options),
+    registerShortcut: (
+      key: string,
+      options: { handler(ctx: ExtensionContext): Promise<void> | void },
+    ) => shortcuts.push({ key, handler: options.handler }),
     appendEntry,
+    sendMessage,
+    sendUserMessage,
   } as unknown as ExtensionAPI;
   const runtime = {} as ModelRuntime;
   const factory = {
@@ -167,7 +184,11 @@ function fixture(factoryOverrides: Partial<Pick<SessionFactory, "createFresh" | 
   return {
     tools,
     handlers,
+    commands,
+    shortcuts,
     appendEntry,
+    sendMessage,
+    sendUserMessage,
     factory,
     createModelRuntime,
     createSessionFactory,
@@ -177,6 +198,98 @@ function fixture(factoryOverrides: Partial<Pick<SessionFactory, "createFresh" | 
 }
 
 describe("pi-subagents extension lifecycle", () => {
+  it("installs the TUI widget and notifies a completion transition only once", async () => {
+    const child = childSession();
+    const { emit, execute, sendMessage, sendUserMessage } = fixture({
+      createFresh: vi.fn(async () => fakeBundle(child)),
+    });
+    const { ctx, notify, setWidget } = context();
+    await emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+
+    expect(setWidget).toHaveBeenCalledWith(
+      "pi-subagents",
+      expect.any(Function),
+      { placement: "aboveEditor" },
+    );
+    const started = await execute(
+      "subagent_start",
+      { description: "work", prompt: "work", model: "fake/worker" },
+      ctx,
+    );
+    child.complete("Status: DONE", usage(1, 1));
+    await execute(
+      "subagent_wait",
+      { agentId: (started.details as { agentId: string }).agentId },
+      ctx,
+    );
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining("completed"), "info");
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(sendUserMessage).not.toHaveBeenCalled();
+  });
+
+  it("registers /agents and Alt+A once and delegates both to the current UI", async () => {
+    const { emit, commands, shortcuts, sendMessage, sendUserMessage } = fixture();
+    const { ctx, notify } = context();
+    await emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+
+    expect([...commands.keys()]).toEqual(["agents"]);
+    expect(shortcuts.map((shortcut) => shortcut.key)).toEqual([Key.alt("a")]);
+    await commands.get("agents")!.handler("", ctx);
+    await shortcuts[0]!.handler(ctx);
+
+    expect(notify).toHaveBeenCalledTimes(2);
+    expect(notify).toHaveBeenCalledWith(
+      "Agent viewer is not available until the viewer component is installed",
+      "info",
+    );
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(sendUserMessage).not.toHaveBeenCalled();
+  });
+
+  it("keeps all agent UI disabled outside TUI mode", async () => {
+    const { emit, commands, shortcuts } = fixture();
+    const { ctx, notify, setWidget } = context([], { mode: "rpc", hasUI: true });
+    await emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+
+    await commands.get("agents")!.handler("", ctx);
+    await shortcuts[0]!.handler(ctx);
+    expect(setWidget).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("disposes and reinstalls branch-local UI across reload and tree reconstruction", async () => {
+    const { emit } = fixture();
+    const first = context(branchEntries("sa_00000001"), { sessionId: "one" });
+    await emit("session_start", { type: "session_start", reason: "startup" }, first.ctx);
+    const second = context(branchEntries("sa_00000002"), { sessionId: "two" });
+    await emit("session_start", { type: "session_start", reason: "reload" }, second.ctx);
+
+    expect(first.setWidget).toHaveBeenLastCalledWith("pi-subagents", undefined);
+    expect(second.setWidget).toHaveBeenCalledWith(
+      "pi-subagents",
+      expect.any(Function),
+      { placement: "aboveEditor" },
+    );
+
+    const third = context(branchEntries("sa_00000003"), { sessionId: "three" });
+    await emit(
+      "session_tree",
+      { type: "session_tree", newLeafId: "new", oldLeafId: "old" },
+      third.ctx,
+    );
+    expect(second.setWidget).toHaveBeenLastCalledWith("pi-subagents", undefined);
+    expect(third.setWidget).toHaveBeenCalledWith(
+      "pi-subagents",
+      expect.any(Function),
+      { placement: "aboveEditor" },
+    );
+    expect(first.notify).not.toHaveBeenCalled();
+    expect(second.notify).not.toHaveBeenCalled();
+    expect(third.notify).not.toHaveBeenCalled();
+  });
+
   it("builds from the active branch and recovers stale work on session_start", async () => {
     const { emit, execute, appendEntry, createModelRuntime, createSessionFactory } = fixture();
     const { ctx, getBranch } = context(branchEntries("sa_00000001", "working"));
@@ -277,13 +390,25 @@ describe("pi-subagents extension lifecycle", () => {
       child.complete("partial", usage(1, 1));
     });
     const { emit, execute } = fixture({ createFresh: vi.fn(async () => fakeBundle(child)) });
-    const { ctx } = context();
+    const { ctx, setWidget } = context();
     await emit("session_start", { type: "session_start", reason: "startup" }, ctx);
     await execute(
       "subagent_start",
       { description: "work", prompt: "work", model: "fake/worker" },
       ctx,
     );
+    const widgetFactory = setWidget.mock.calls[0]![1] as (
+      tui: TUI,
+      theme: Theme,
+    ) => { dispose(): void };
+    const widget = widgetFactory(
+      { requestRender: vi.fn() } as unknown as TUI,
+      {
+        fg: (_color: string, text: string) => text,
+        bold: (text: string) => text,
+      } as Theme,
+    );
+    const disposeWidget = vi.spyOn(widget, "dispose");
 
     let settled = false;
     const shuttingDown = emit("session_shutdown", { type: "session_shutdown", reason: "quit" }, ctx)
@@ -292,9 +417,13 @@ describe("pi-subagents extension lifecycle", () => {
       });
     await vi.waitFor(() => expect(child.abort).toHaveBeenCalledOnce());
     expect(settled).toBe(false);
+    expect(disposeWidget).not.toHaveBeenCalled();
+    expect(setWidget).not.toHaveBeenCalledWith("pi-subagents", undefined);
     gate.resolve();
     await shuttingDown;
     expect(child.dispose).toHaveBeenCalledOnce();
+    expect(disposeWidget).toHaveBeenCalledOnce();
+    expect(setWidget).toHaveBeenLastCalledWith("pi-subagents", undefined);
 
     const after = await execute("subagent_list", {}, ctx);
     expect(after.details).toMatchObject({ infrastructureError: true });
