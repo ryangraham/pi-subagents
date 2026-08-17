@@ -147,7 +147,12 @@ describe("registerSubagentTools", () => {
         expect.stringContaining("fix rounds 1-3"),
         expect.stringContaining("fresh subagent_run"),
         expect.stringContaining("Never copy controller conversation history"),
+        expect.stringMatching(/Every subagent_start.*subagent_wait/),
+        expect.stringContaining("after subagent_abort"),
       ]),
+    );
+    expect(tool("subagent_run").promptGuidelines?.join("\n")).not.toContain(
+      "subagent_wait or subagent_abort so its final result and usage are collected",
     );
     for (const value of tools) {
       expect(value.label).toMatch(/^Subagent /);

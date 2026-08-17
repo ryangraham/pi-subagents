@@ -76,7 +76,7 @@ const SDD_GUIDELINES = [
   "Use subagent_resume with the original implementer ID for Superpowers fix rounds 1-3; use a fresh subagent_run with an explicitly more capable canonical provider/model for fix rounds 4-5.",
   "Never copy controller conversation history into a subagent prompt; pass task briefs, reports, plans, and review packages by file path.",
   "Never run multiple Superpowers implementation agents concurrently.",
-  "Every subagent_start must eventually be paired with subagent_wait or subagent_abort so its final result and usage are collected.",
+  "Every subagent_start must eventually be followed by subagent_wait so its final result and usage are collected; when cancellation is needed, call subagent_wait after subagent_abort.",
 ];
 
 const TOOL_NAMES = new Set<SubagentToolName>(Object.keys(TOOL_METADATA) as SubagentToolName[]);
